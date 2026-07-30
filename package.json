@@ -1,0 +1,8 @@
+{
+  "name": "travel-agent-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dashboard": "node --disable-warning=ExperimentalWarning --experimental-strip-types web/server.ts"
+  }
+}

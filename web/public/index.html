@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f5c400" />
+    <title>TravelAgent Fare Calendar</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="TravelAgent home">
+        <span class="brand-mark">TA</span>
+        <span>TRAVEL<span>AGENT</span></span>
+      </a>
+      <div class="local-badge">LOCAL DATA</div>
+    </header>
+
+    <main>
+      <section class="route-panel">
+        <div>
+          <p class="eyebrow">Fare calendar</p>
+          <h1 id="route-title">Loading routes…</h1>
+          <p class="subtitle">Latest locally observed one-way fares · 1 adult</p>
+        </div>
+        <div class="route-control">
+          <label for="route-select">Route</label>
+          <select id="route-select" aria-label="Route"></select>
+        </div>
+      </section>
+
+      <section class="toolbar" aria-label="Calendar controls">
+        <div class="cabin-tabs" role="tablist">
+          <button class="cabin-tab active" data-cabin="Standard" role="tab">Standard</button>
+          <button class="cabin-tab" data-cabin="ZIP Full-Flat" role="tab">ZIP Full-Flat</button>
+          <button class="cabin-tab" data-cabin="All" role="tab">Compare</button>
+        </div>
+        <div class="summary" id="summary"></div>
+      </section>
+
+      <section id="calendar" class="calendar" aria-live="polite"></section>
+    </main>
+
+    <footer>
+      <span id="data-status">Loading local database…</span>
+      <span>Prices are observations, not booking guarantees.</span>
+    </footer>
+
+    <script type="module" src="/app.ts"></script>
+  </body>
+</html>
