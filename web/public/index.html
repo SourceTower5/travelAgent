@@ -21,20 +21,26 @@
         <div>
           <p class="eyebrow">Fare calendar</p>
           <h1 id="route-title">Loading routes…</h1>
-          <p class="subtitle">Latest locally observed one-way fares · 1 adult</p>
+          <p class="subtitle" id="route-subtitle">Latest locally observed fares · 1 adult</p>
         </div>
-        <div class="route-control">
-          <label for="route-select">Route</label>
-          <select id="route-select" aria-label="Route"></select>
+        <div class="route-controls">
+          <div class="route-control">
+            <label for="provider-select">Provider</label>
+            <select id="provider-select" aria-label="Provider"></select>
+          </div>
+          <div class="route-control">
+            <label for="origin-select">From</label>
+            <select id="origin-select" aria-label="Source airport"></select>
+          </div>
+          <div class="route-control">
+            <label for="destination-select">To</label>
+            <select id="destination-select" aria-label="Destination airport"></select>
+          </div>
         </div>
       </section>
 
       <section class="toolbar" aria-label="Calendar controls">
-        <div class="cabin-tabs" role="tablist">
-          <button class="cabin-tab active" data-cabin="Standard" role="tab">Standard</button>
-          <button class="cabin-tab" data-cabin="ZIP Full-Flat" role="tab">ZIP Full-Flat</button>
-          <button class="cabin-tab" data-cabin="All" role="tab">Compare</button>
-        </div>
+        <div class="cabin-tabs" id="cabin-tabs" role="tablist"></div>
         <div class="summary" id="summary"></div>
       </section>
 

@@ -28,11 +28,15 @@ def test_sanitize_fares_excludes_private_fields_and_urls() -> None:
             "origin": "SFO",
             "destination": "NRT",
             "departure_date": "2026-10-15",
+            "return_date": None,
+            "trip_type": "one_way",
             "cabin": "economy",
             "price": 640.0,
+            "price_kind": "displayed",
             "currency": "USD",
             "available_seats": 7,
             "observed_at": "2026-01-01T00:00:00+00:00",
+            "source_freshness": None,
         }
     ]
     assert "booking_url" not in sanitized[0]

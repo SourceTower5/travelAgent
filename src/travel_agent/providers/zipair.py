@@ -21,6 +21,17 @@ logger = logging.getLogger(__name__)
 ZIPAIR_SEARCH_URL = "https://www.zipair.net/en/"
 DEFAULT_TIMEOUT_MS = 15_000
 CHROME_CDP_URL = os.getenv("CHROME_CDP_URL", "http://127.0.0.1:9222")
+ZIPAIR_ROUTES = {
+    ("SFO", "NRT"),
+    ("SJC", "NRT"),
+    ("NRT", "SFO"),
+    ("NRT", "SJC"),
+}
+ZIPAIR_AIRPORT_NAMES = {
+    "NRT": "Tokyo",
+    "SFO": "San Francisco",
+    "SJC": "San Jose",
+}
 
 
 def find_zipair_page(pages: list[Page]) -> Page:
@@ -100,8 +111,6 @@ class ZipairProvider:
         if end_date < start_date:
             raise ProviderSearchError("ZIPAIR scan end date must be on or after its start date")
         self._validate_query(SearchQuery(origin, destination, start_date, passengers))
-        if end_date > date(2026, 12, 31):
-            raise ProviderSearchError("ZIPAIR scan end date cannot be after 2026-12-31")
 
         try:
             with sync_playwright() as playwright:
@@ -248,7 +257,10 @@ class ZipairProvider:
                 continue
 
             if "/booking/people" in page.url:
-                if page.get_by_role("button", name="Decrease Adult", exact=True).count() == 0:
+                adult_control = page.get_by_role("button", name="Decrease Adult", exact=True)
+                try:
+                    adult_control.first.wait_for(state="visible", timeout=self.timeout_ms)
+                except PlaywrightTimeoutError:
                     raise ProviderSearchError("ZIPAIR passenger page did not expose the adult controls")
                 next_button = page.get_by_role("button", name="Next", exact=True)
                 if next_button.count() == 0:
@@ -264,9 +276,11 @@ class ZipairProvider:
         )
 
     def _extract_calendar_fares_html(self, page: Page, query: SearchQuery) -> str:
+        self._require_calendar_route(page, query.origin, query.destination)
         fare_cards: list[str] = []
         departure_date = query.departure_date.isoformat()
         for cabin in ("Standard", "ZIP Full-Flat"):
+            self._require_calendar_route(page, query.origin, query.destination)
             cabin_button = page.get_by_role("button", name=cabin, exact=True)
             if cabin_button.count() == 0:
                 logger.warning("ZIPAIR calendar did not expose the %s cabin selector", cabin)
@@ -310,11 +324,14 @@ class ZipairProvider:
         start_date: date,
         end_date: date,
     ) -> list[FareOption]:
+        self._require_calendar_route(page, origin, destination)
         observed_at = datetime.now(timezone.utc)
         fares: list[FareOption] = []
         for cabin in ("Standard", "ZIP Full-Flat"):
+            self._require_calendar_route(page, origin, destination)
             if not self._activate_cabin(page, cabin):
                 continue
+            self._require_calendar_route(page, origin, destination)
             self._wait_for_calendar_dates(page)
             for date_button in page.locator("button[data-fulldate]").all():
                 date_value = date_button.get_attribute("data-fulldate")
@@ -374,34 +391,84 @@ class ZipairProvider:
             return False
         return True
 
-    @staticmethod
-    def _calendar_matches_route(page: Page, origin: str, destination: str) -> bool:
-        cities = {"SFO": "San Francisco", "SJC": "San Jose", "NRT": "Tokyo"}
-        origin_city = cities.get(origin.upper())
-        destination_city = cities.get(destination.upper())
-        if origin_city is None or destination_city is None:
-            return False
+    @classmethod
+    def _calendar_matches_route(cls, page: Page, origin: str, destination: str) -> bool:
+        """Require directional route evidence from controls or a compact summary.
+
+        The whole page body is deliberately not considered. ZIPAIR renders airport
+        names in menus and navigation, so body-text ordering can make a stale
+        forward calendar appear to match a reverse request.
+        """
+        normalized_origin = origin.upper()
+        normalized_destination = destination.upper()
         try:
-            visible_text = page.locator("body").inner_text(timeout=5_000)
+            origin_control = page.get_by_role(
+                "button", name=re.compile(r"Origin \(Country, Region\)", re.I)
+            )
+            destination_control = page.get_by_role(
+                "button", name=re.compile(r"Destination \(Country, Region\)", re.I)
+            )
+            if origin_control.count() and destination_control.count():
+                origin_text = origin_control.first.inner_text(timeout=5_000)
+                destination_text = destination_control.first.inner_text(timeout=5_000)
+                return (
+                    _contains_airport_code(origin_text, normalized_origin)
+                    and _contains_airport_code(destination_text, normalized_destination)
+                )
+
+            route_names = page.locator(
+                ".booking-header .route .head-content, "
+                ".booking-header .route-content .head-content"
+            ).evaluate_all(
+                """elements => elements
+                    .map(element => (element.innerText || "").replace(/\\s+/g, " ").trim())
+                    .filter(Boolean)"""
+            )
+            if any(
+                _route_name_evidence_matches(text, normalized_origin, normalized_destination)
+                for text in route_names
+            ):
+                return True
+
+            candidates = page.locator(
+                '[data-testid*="route" i], [data-testid*="flight" i], '
+                '[class*="route" i], [class*="calendar-header" i], '
+                '[class*="flight-info" i], main h1, main h2, main h3'
+            ).evaluate_all(
+                """elements => elements
+                    .filter(element => {
+                        const style = window.getComputedStyle(element);
+                        return style.visibility !== "hidden" && style.display !== "none";
+                    })
+                    .map(element => (element.innerText || "").replace(/\\s+/g, " ").trim())
+                    .filter(text => text.length > 0 && text.length <= 250)"""
+            )
         except PlaywrightError:
             return False
-        normalized = " ".join(visible_text.lower().split())
-        origin_index = normalized.find(origin_city.lower())
-        destination_index = normalized.find(destination_city.lower(), origin_index + 1)
-        return origin_index >= 0 and destination_index > origin_index
+        return any(
+            _route_evidence_matches(text, normalized_origin, normalized_destination)
+            for text in candidates
+        )
+
+    @classmethod
+    def _require_calendar_route(cls, page: Page, origin: str, destination: str) -> None:
+        if not cls._calendar_matches_route(page, origin, destination):
+            raise ProviderSearchError(
+                f"ZIPAIR calendar route could not be verified as "
+                f"{origin.upper()} → {destination.upper()}; no fares were recorded"
+            )
 
     @staticmethod
     def _validate_query(query: SearchQuery) -> None:
         route = (query.origin.upper(), query.destination.upper())
-        supported_routes = {("SFO", "NRT"), ("SJC", "NRT"), ("NRT", "SJC"), ("NRT", "SFO")}
-        if route not in supported_routes:
+        if route not in ZIPAIR_ROUTES:
             raise ProviderSearchError(
-                "ZIPAIR supports SFO→NRT, SJC→NRT, NRT→SJC, and NRT→SFO searches"
+                "ZIPAIR monitoring is restricted to SFO/SJC ↔ NRT"
             )
         if query.passengers != 1:
             raise ProviderSearchError("ZIPAIR workflow currently supports exactly one adult passenger")
-        if query.departure_date < date.today() or query.departure_date > date(2026, 12, 31):
-            raise ProviderSearchError("ZIPAIR departure date must be from today through 2026-12-31")
+        if query.departure_date < date.today():
+            raise ProviderSearchError("ZIPAIR departure date cannot be in the past")
 
     def _click_if_present(self, page: Any, pattern: str) -> None:
         locator = page.get_by_role("tab", name=re.compile(pattern, re.I))
@@ -496,6 +563,34 @@ class ZipairProvider:
                 "ZIPAIR blocked automated access before fares could be read. "
                 "Try again later or inspect the public site manually."
             )
+
+
+def _contains_airport_code(value: str, airport: str) -> bool:
+    return re.search(rf"(?<![A-Z]){re.escape(airport.upper())}(?![A-Z])", value.upper()) is not None
+
+
+def _route_evidence_matches(value: str, origin: str, destination: str) -> bool:
+    """Match two explicit IATA codes in directional order within one small UI element."""
+    normalized = " ".join(value.upper().split())
+    origin_match = re.search(rf"(?<![A-Z]){re.escape(origin)}(?![A-Z])", normalized)
+    if origin_match is None:
+        return False
+    destination_match = re.search(
+        rf"(?<![A-Z]){re.escape(destination)}(?![A-Z])",
+        normalized[origin_match.end() :],
+    )
+    return destination_match is not None
+
+
+def _route_name_evidence_matches(value: str, origin: str, destination: str) -> bool:
+    origin_name = ZIPAIR_AIRPORT_NAMES.get(origin)
+    destination_name = ZIPAIR_AIRPORT_NAMES.get(destination)
+    if origin_name is None or destination_name is None:
+        return False
+    normalized = " ".join(value.casefold().split())
+    origin_index = normalized.find(origin_name.casefold())
+    destination_index = normalized.find(destination_name.casefold(), origin_index + len(origin_name))
+    return origin_index >= 0 and destination_index > origin_index
 
 
 class _ZipairFareHTMLParser(HTMLParser):

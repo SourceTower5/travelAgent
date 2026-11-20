@@ -18,55 +18,63 @@ if (!existsSync(databasePath)) {
 const database = new DatabaseSync(databasePath, { readOnly: true });
 
 type FareRow = {
+  provider: string;
   origin: string;
   destination: string;
   departure_date: string;
+  return_date: string | null;
+  trip_type: string;
   cabin: string;
   price: number;
+  price_kind: string;
   currency: string;
   available_seats: number | null;
   observed_at: string;
+  source_freshness: string | null;
 };
 
 const latestFares = database.prepare(`
-  WITH batches AS (
+  WITH ranked_fares AS (
     SELECT
-      origin,
-      destination,
-      observed_at,
-      COUNT(*) AS fare_count
-    FROM fares
-    WHERE provider = 'zipair'
-      AND cabin IN ('Standard', 'ZIP Full-Flat')
-    GROUP BY origin, destination, observed_at
-  ),
-  ranked_batches AS (
-    SELECT
-      origin,
-      destination,
-      observed_at,
+      fares.*,
       ROW_NUMBER() OVER (
-        PARTITION BY origin, destination
-        ORDER BY CASE WHEN fare_count >= 3 THEN 1 ELSE 0 END DESC, observed_at DESC
-      ) AS rank
-    FROM batches
+        PARTITION BY provider, origin, destination, departure_date, cabin
+        ORDER BY observed_at DESC, id DESC
+      ) AS date_rank
+    FROM fares
+    WHERE provider IN ('ana-google', 'jal', 'jal-google', 'zipair')
+      AND (
+        destination IN ('HND', 'NRT')
+        OR (origin = 'SFO' AND destination IN ('ITM', 'KIX', 'OSA'))
+        OR (
+          provider = 'zipair'
+          AND origin = 'NRT'
+          AND destination IN ('SFO', 'SJC')
+        )
+        OR (
+          provider IN ('ana-google', 'jal', 'jal-google')
+          AND origin IN ('HND', 'NRT', 'KIX')
+          AND destination IN ('SFO', 'SJC')
+        )
+      )
   )
   SELECT
-    fares.origin,
-    fares.destination,
-    fares.departure_date,
-    fares.cabin,
-    fares.price,
-    fares.currency,
-    fares.available_seats,
-    fares.observed_at
-  FROM fares
-  JOIN ranked_batches
-    ON ranked_batches.origin = fares.origin
-   AND ranked_batches.destination = fares.destination
-   AND ranked_batches.observed_at = fares.observed_at
-  WHERE ranked_batches.rank = 1
-  ORDER BY fares.origin, fares.destination, fares.departure_date, fares.cabin
+    provider,
+    origin,
+    destination,
+    departure_date,
+    return_date,
+    trip_type,
+    cabin,
+    price,
+    price_kind,
+    currency,
+    available_seats,
+    observed_at,
+    source_freshness
+  FROM ranked_fares
+  WHERE date_rank = 1
+  ORDER BY provider, origin, destination, departure_date, cabin
 `);
 
 function sendJson(response: ServerResponse, value: unknown): void {
@@ -102,10 +110,30 @@ const server = createServer((request, response) => {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? host}`);
   if (url.pathname === "/api/fares") {
     const fares = latestFares.all() as FareRow[];
-    const routes = [...new Set(fares.map((fare) => `${fare.origin}-${fare.destination}`))];
+    const routeMap = new Map(
+      fares.map((fare) => {
+        const id = `${fare.provider}:${fare.origin}-${fare.destination}`;
+        return [
+          id,
+          {
+            id,
+            provider: fare.provider,
+            origin: fare.origin,
+            destination: fare.destination,
+          },
+        ];
+      }),
+    );
+    for (const route of [
+      { provider: "zipair", origin: "NRT", destination: "SFO" },
+      { provider: "zipair", origin: "NRT", destination: "SJC" },
+    ]) {
+      const id = `${route.provider}:${route.origin}-${route.destination}`;
+      if (!routeMap.has(id)) routeMap.set(id, { id, ...route });
+    }
     sendJson(response, {
       database: databasePath,
-      routes,
+      routes: [...routeMap.values()],
       fareCount: fares.length,
       fares,
     });

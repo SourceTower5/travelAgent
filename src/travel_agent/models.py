@@ -40,5 +40,9 @@ class Fare(Base):
     available_seats: Mapped[int | None] = mapped_column(Integer)
     observed_at: Mapped[str] = mapped_column(String, nullable=False)
     booking_url: Mapped[str | None] = mapped_column(String)
+    return_date: Mapped[str | None] = mapped_column(String)
+    trip_type: Mapped[str] = mapped_column(String, nullable=False, default="one_way")
+    price_kind: Mapped[str] = mapped_column(String, nullable=False, default="displayed")
+    source_freshness: Mapped[str | None] = mapped_column(String)
 
     search: Mapped[Search] = relationship(back_populates="fares")

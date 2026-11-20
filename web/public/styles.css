@@ -70,7 +70,13 @@ main { max-width: 1460px; margin: 0 auto; padding: 36px clamp(16px, 4vw, 56px) 6
 h1 { margin: 0; font-size: clamp(30px, 4vw, 54px); line-height: 1; letter-spacing: -.045em; }
 .subtitle { margin: 14px 0 0; font-size: 14px; }
 
-.route-control { min-width: min(100%, 320px); }
+.route-controls {
+  width: min(100%, 680px);
+  display: grid;
+  grid-template-columns: minmax(120px, .7fr) repeat(2, minmax(180px, 1fr));
+  gap: 12px;
+}
+.route-control { min-width: 0; }
 .route-control label { display: block; margin-bottom: 7px; font-size: 11px; font-weight: 800; text-transform: uppercase; }
 .route-control select {
   width: 100%;
@@ -162,7 +168,7 @@ footer {
 
 @media (max-width: 800px) {
   .route-panel, .toolbar { align-items: stretch; flex-direction: column; }
-  .route-control { min-width: 100%; }
+  .route-controls { width: 100%; grid-template-columns: 1fr; }
   .summary { text-align: left; justify-content: start; }
   .calendar { grid-template-columns: 1fr; }
   footer { flex-direction: column; }

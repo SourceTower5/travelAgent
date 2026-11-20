@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,10 @@ class FareOption:
     available_seats: int | None
     observed_at: datetime
     booking_url: str | None = None
+    return_date: date | None = None
+    trip_type: str = "one_way"
+    price_kind: str = "displayed"
+    source_freshness: str | None = None
 
 
 class ProviderSearchError(RuntimeError):
@@ -36,3 +40,16 @@ class TravelProvider(Protocol):
 
     def search(self, query: SearchQuery) -> list[FareOption]:
         """Return structured fare data without exposing credentials or raw pages."""
+
+
+@runtime_checkable
+class RangeTravelProvider(TravelProvider, Protocol):
+    def search_range(
+        self,
+        origin: str,
+        destination: str,
+        start_date: date,
+        end_date: date,
+        passengers: int = 1,
+    ) -> list[FareOption]:
+        """Return structured fares whose departure dates fall within a date range."""

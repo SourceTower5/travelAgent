@@ -1,80 +1,69 @@
 # Travel Agent System Design
 
-Date: 2026-07-29
-Runtime repo: /home/jimmyphan/travelAgent
+## Architecture
 
-## Existing Architecture
-- 	ravel_agent.cli: argparse CLI entry point with check command.
-- 	ravel_agent.providers.base: provider protocol plus SearchQuery, FareOption, and provider error type.
-- 	ravel_agent.providers.mock: deterministic test/demo provider.
-- 	ravel_agent.providers.zipair: Playwright-based ZIPAIR provider that currently needs to be aligned to the real homepage and booking calendar flow.
-- 	ravel_agent.sanitize: removes booking URL/raw implementation detail before LLM use.
-- 	ravel_agent.llm: LiteLLM fallback summarizer over sanitized fare JSON.
-- 	ravel_agent.storage: SQLAlchemy/Alembic SQLite search history store.
-- 	ravel_agent.models: Search and Fare ORM models.
+- `travel_agent.cli`: `check` and `scan` command parsing and provider dispatch.
+- `travel_agent.providers.base`: shared fare types and provider protocols.
+- `travel_agent.providers.zipair`: ZIPAIR homepage-to-calendar Playwright flow.
+- `travel_agent.providers.jal`: official JAL Economy and Premium Economy flow.
+- `travel_agent.providers.ana`: cached public ANA round-trip deals.
+- `travel_agent.providers.ana_live`: official ANA one-way date-strip fares.
+- `travel_agent.providers.google_flights`: airline-filtered price-graph fares.
+- `travel_agent.storage` and `travel_agent.models`: SQLite history through
+  SQLAlchemy and Alembic.
+- `travel_agent.sanitize`: minimal JSON-safe fare summaries.
+- `web/server.ts`: read-only SQLite API and static dashboard server.
+- `web/public/app.ts`: provider, route, cabin, and cross-year calendar display.
 
-## ZIPAIR Flow To Implement
-ZIPAIR should be treated as a browser-driven public-page provider, not a plain HTTP scraper.
+## Collection Flow
 
-Target flow:
+```text
+CLI arguments
+  -> provider.search() or provider.search_range()
+  -> structured FareOption values
+  -> SearchHistoryStore.save_search()
+  -> SQLite searches and fares
+  -> GET /api/fares
+  -> local dashboard
+```
 
-1. Open https://www.zipair.net/en.
-2. Select one-way trip mode.
-3. Select origin airport SFO, then destination NRT.
-4. Select one adult passenger.
-5. Navigate/search into https://www.zipair.net/en/booking/calendar.
-6. Iterate available calendar dates from the run date through 2026-12-31.
-7. Repeat the same workflow for origin SJC to destination NRT.
-8. Extract fare rows for economy/standard and full-flat cabins when available.
-9. Return structured FareOption values only.
+Range-capable providers collect a route window in one browser flow. The CLI
+persists observations by route and departure date. Scans are quiet unless
+`--json` is requested.
 
-If ZIPAIR changes selectors, blocks automation, or does not expose structured fare data, the provider should raise ProviderSearchError with a clear local-only message.
+## Provider Scope
+
+ZIPAIR supports SFO/SJC to NRT and reverse routes. It collects one-way Standard
+and ZIP Full-Flat fares for dates exposed by the live calendar, without a fixed
+calendar-year cap.
+
+Official JAL supports SFO/SJC and HND/NRT/KIX in either direction. Economy and
+Premium Economy use separate one-way scans. The provider verifies route and
+cabin state before storing calendar-lowest observations.
+
+Cached ANA deals are round-trip "fares from," not live inventory. They retain a
+return date, price qualifier, and public freshness text. Other live providers
+currently produce one-way observations.
 
 ## Safety Boundary
-Provider code may touch browser automation, public pages, and raw page content. Sanitizer and LLM layers must never receive credentials, cookies, browser storage, auth files, raw HTML, screenshots of private pages, or private account data. Any future provider requiring auth should keep auth local and expose only structured public-safe result objects.
 
-## Recommended Next Architecture
-Add a ZIPAIR monitor layer above provider checks:
+Browser automation, raw pages, cookies, and session state remain inside local
+provider execution. The repository must not contain browser profiles, auth
+state, databases, secrets, or private page captures. LLM summarization accepts
+sanitized fare JSON only.
 
-- TripWatch: persisted user intent: provider, origin, destination, date window, passenger count, cabin preferences, max price, enabled flag, notes.
-- WatchRun: execution record for a watch: started_at, status, provider error, fare_count, cheapest fare, summary.
-- FareObservation: reuse or extend current Fare model for individual observed fare options.
-- ChangeDetector: compares latest sanitized fares with the previous successful run.
-- Notifier protocol: starts with CLI output; later supports Notion, email, desktop, or Linear updates.
+## Persistence
 
-## CLI Shape
-Proposed commands:
+`Search` records the provider query. `Fare` records provider, route, departure
+and optional return date, cabin, price, currency, availability, observation
+time, trip type, price kind, and public freshness text. Alembic owns schema
+changes; local databases are ignored by Git.
 
-`ash
-travel-agent check --provider zipair --origin SFO --destination NRT --date 2026-10-15
-travel-agent zipair scan --origins SFO,SJC --destination NRT --start-date today --end-date 2026-12-31 --cabins standard,full-flat
-travel-agent watch add --provider zipair --origin SFO --destination NRT --start-date today --end-date 2026-12-31 --cabins standard,full-flat
-travel-agent watch list
-travel-agent watch run <watch-id>
-travel-agent watch run-all
-travel-agent watch disable <watch-id>
-`
+## Testing
 
-## Data Model Sketch
-- watches: id, provider, origin, destination, start_date, end_date, passengers, cabins, max_price, currency, enabled, created_at, updated_at, notes.
-- watch_runs: id, watch_id, status, started_at, completed_at, provider_error, fare_count, cheapest_price, summary_json.
-- ares: keep current fields and add nullable watch_run_id, or keep search_id and add a relation from search to watch.
-
-Prefer a migration that preserves existing searches and ares history. Avoid destructive schema rewrites.
-
-## Implementation Constraints
-- Keep Python 3.12 and uv.
-- Continue using SQLite, SQLAlchemy, Alembic, pytest, and Playwright.
-- Continue parser fixture tests for every provider.
-- Do not add a web UI in the next milestone.
-- Run and test inside WSL Ubuntu, not the Windows workspace or a duplicate copy.
-- Do not use plain HTTP scraping as the primary ZIPAIR strategy if direct fetch returns 403 Forbidden.
-
-## Test Strategy
-- Unit tests for date-window generation from today through 2026-12-31.
-- Unit tests for watch model serialization and validation.
-- Storage tests for creating watches, recording runs, and preserving previous search history.
-- CLI tests for watch add/list/run using the mock provider.
-- ZIPAIR parser fixture tests for economy/standard and full-flat fare cards.
-- Change detection tests for price drops, price rises, no fares, and provider errors.
-- Sanitizer tests proving no unsafe fields cross into LLM summaries.
+- Parser fixtures for ZIPAIR, JAL, and cached ANA.
+- CLI tests for routes, date windows, and cabin groups.
+- Storage and migration compatibility tests.
+- Sanitizer boundary tests.
+- Live provider verification remains manual because it requires public sites
+  and a local Chrome CDP session.

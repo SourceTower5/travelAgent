@@ -9,7 +9,18 @@ from typing import Iterable
 
 from travel_agent.config import load_settings
 from travel_agent.logging_config import configure_logging
-from travel_agent.providers import MockProvider, ProviderSearchError, SearchQuery, TravelProvider, ZipairProvider
+from travel_agent.providers import (
+    AnaProvider,
+    AnaLiveProvider,
+    JalProvider,
+    GoogleFlightsProvider,
+    MockProvider,
+    ProviderSearchError,
+    RangeTravelProvider,
+    SearchQuery,
+    TravelProvider,
+    ZipairProvider,
+)
 from travel_agent.sanitize import sanitize_fares
 from travel_agent.storage import SearchHistoryStore
 
@@ -21,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     check = subparsers.add_parser("check", help="Check travel availability")
-    check.add_argument("--provider", choices=["mock", "zipair"], required=True)
+    check.add_argument("--provider", choices=["ana", "ana-google", "ana-live", "jal", "jal-google", "mock", "zipair"], required=True)
     check.add_argument("--origin", required=True)
     check.add_argument("--destination", required=True)
     check.add_argument("--date", required=True, help="Departure date in YYYY-MM-DD format")
@@ -34,8 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--summarize", action="store_true", help="Summarize sanitized fare JSON with LiteLLM")
 
     scan = subparsers.add_parser("scan", help="Scan a date range for travel availability")
-    scan.add_argument("--provider", choices=["mock", "zipair"], required=True)
-    scan.add_argument("--routes", help="Comma-separated routes, e.g. SFO-NRT,SJC-NRT,NRT-SJC,NRT-SFO")
+    scan.add_argument("--provider", choices=["ana", "ana-google", "ana-live", "jal", "jal-google", "mock", "zipair"], required=True)
+    scan.add_argument(
+        "--routes",
+        help="Comma-separated routes, e.g. SFO-NRT,SJC-NRT or ANA country routes SFO-JP,SJC-JP",
+    )
     scan.add_argument("--origins", help="Comma-separated origin airport codes (legacy single-destination mode)")
     scan.add_argument("--destination", help="Destination for --origins")
     scan.add_argument("--start-date", default=date.today().isoformat(), help="YYYY-MM-DD; defaults to today")
@@ -48,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--cabins",
         default="economy,full-flat",
-        help="Comma-separated cabin groups to retain: economy, full-flat",
+        help="Comma-separated cabin groups to retain: economy, premium-economy, full-flat",
     )
     scan.add_argument("--fail-fast", action="store_true", help="Stop after the first provider failure")
     scan.add_argument(
@@ -60,9 +74,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def get_provider(name: str, *, interactive: bool = False) -> TravelProvider:
+def get_provider(
+    name: str,
+    *,
+    interactive: bool = False,
+    cabin_groups: set[str] | None = None,
+) -> TravelProvider:
     if name == "mock":
         return MockProvider()
+    if name == "ana":
+        return AnaProvider()
+    if name == "ana-live":
+        return AnaLiveProvider()
+    if name == "jal":
+        cabin = "Premium Economy" if cabin_groups == {"premium-economy"} else "Economy"
+        return JalProvider(cabin=cabin)
+    if name == "ana-google":
+        return GoogleFlightsProvider("ANA")
+    if name == "jal-google":
+        return GoogleFlightsProvider("JAL")
     if name == "zipair":
         return ZipairProvider(interactive=interactive)
     raise ValueError(f"Unsupported provider: {name}")
@@ -73,7 +103,7 @@ def run_check(args: argparse.Namespace) -> int:
     provider = get_provider(args.provider, interactive=getattr(args, "interactive", False))
     query = SearchQuery(
         origin=args.origin.upper(),
-        destination=args.destination.upper(),
+        destination=_normalize_destination(args.destination),
         departure_date=date.fromisoformat(args.date),
         passengers=args.passengers,
     )
@@ -119,14 +149,23 @@ def run_scan(args: argparse.Namespace) -> int:
         raise ValueError("--end-date must be on or after --start-date")
 
     cabin_groups = _parse_cabin_groups(args.cabins)
-    provider = get_provider(args.provider, interactive=args.interactive)
+    if "premium-economy" in cabin_groups:
+        if args.provider != "jal":
+            raise ValueError("premium-economy cabin scans are currently supported only for JAL")
+        if cabin_groups != {"premium-economy"}:
+            raise ValueError("scan JAL premium-economy separately from other cabin groups")
+    provider = get_provider(
+        args.provider,
+        interactive=args.interactive,
+        cabin_groups=cabin_groups,
+    )
     store = SearchHistoryStore(settings.database_path)
     store.initialize()
 
     fares = []
     failures: list[dict[str, str]] = []
     search_ids: list[int] = []
-    if isinstance(provider, ZipairProvider):
+    if isinstance(provider, RangeTravelProvider):
         for origin, destination in routes:
             try:
                 route_fares = provider.search_range(
@@ -145,18 +184,21 @@ def run_scan(args: argparse.Namespace) -> int:
                     "error": str(exc),
                 }
                 failures.append(failure)
-                logger.warning("Skipping failed ZIPAIR range scan: %s", failure)
+                logger.warning("Skipping failed %s range scan: %s", provider.name.upper(), failure)
                 if args.fail_fast:
                     break
                 continue
 
             selected_fares = [fare for fare in route_fares if _matches_cabin_group(fare.cabin, cabin_groups)]
             fares.extend(selected_fares)
-            fares_by_date: dict[date, list] = {}
+            fares_by_route_date: dict[tuple[str, str, date], list] = {}
             for fare in selected_fares:
-                fares_by_date.setdefault(fare.departure_date, []).append(fare)
-            for departure_date, daily_fares in sorted(fares_by_date.items()):
-                query = SearchQuery(origin, destination, departure_date, args.passengers)
+                key = (fare.origin, fare.destination, fare.departure_date)
+                fares_by_route_date.setdefault(key, []).append(fare)
+            for (fare_origin, fare_destination, departure_date), daily_fares in sorted(
+                fares_by_route_date.items()
+            ):
+                query = SearchQuery(fare_origin, fare_destination, departure_date, args.passengers)
                 search_ids.append(store.save_search(provider.name, query, daily_fares))
 
         result = {
@@ -219,16 +261,21 @@ def _parse_scan_routes(routes: str | None, origins: str | None, destination: str
             parts = [part.strip().upper() for part in route.split("-")]
             if len(parts) != 2 or not all(parts):
                 raise ValueError(f"Invalid route {route!r}; expected ORIGIN-DESTINATION")
-            parsed.append((parts[0], parts[1]))
+            parsed.append((parts[0], _normalize_destination(parts[1])))
         return parsed
     if not origins or not destination:
         raise ValueError("Provide --routes or both --origins and --destination")
-    return [(origin, destination.upper()) for origin in _parse_airports(origins)]
+    return [(origin, _normalize_destination(destination)) for origin in _parse_airports(origins)]
+
+
+def _normalize_destination(value: str) -> str:
+    normalized = value.strip().upper()
+    return "JP" if normalized == "JAPAN" else normalized
 
 
 def _parse_cabin_groups(value: str) -> set[str]:
     groups = {group.strip().lower() for group in value.split(",") if group.strip()}
-    supported = {"economy", "full-flat"}
+    supported = {"economy", "premium-economy", "full-flat"}
     unknown = groups - supported
     if unknown:
         raise ValueError(f"Unsupported cabin group(s): {', '.join(sorted(unknown))}")
@@ -237,6 +284,8 @@ def _parse_cabin_groups(value: str) -> set[str]:
 
 def _matches_cabin_group(cabin: str, groups: set[str]) -> bool:
     normalized = " ".join(cabin.lower().replace("_", " ").replace("-", " ").split())
+    if "premium economy" in normalized:
+        return "premium-economy" in groups
     if "full flat" in normalized:
         return "full-flat" in groups
     return "economy" in groups
