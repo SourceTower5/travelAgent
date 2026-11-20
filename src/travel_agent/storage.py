@@ -32,10 +32,10 @@ class SearchHistoryStore:
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
         alembic_config = self._alembic_config()
-        if self._has_unversioned_history_schema(self.engine):
-            command.stamp(alembic_config, "head")
-        else:
-            command.upgrade(alembic_config, "head")
+        unversioned_revision = self._unversioned_history_revision(self.engine)
+        if unversioned_revision is not None:
+            command.stamp(alembic_config, unversioned_revision)
+        command.upgrade(alembic_config, "head")
         logger.info("Initialized SQLite history at %s", self.database_path)
 
     def save_search(self, provider: str, query: SearchQuery, fares: list[FareOption]) -> int:
@@ -62,6 +62,10 @@ class SearchHistoryStore:
                     available_seats=fare.available_seats,
                     observed_at=fare.observed_at.isoformat(),
                     booking_url=fare.booking_url,
+                    return_date=fare.return_date.isoformat() if fare.return_date else None,
+                    trip_type=fare.trip_type,
+                    price_kind=fare.price_kind,
+                    source_freshness=fare.source_freshness,
                 )
                 for fare in fares
             ]
@@ -92,7 +96,14 @@ class SearchHistoryStore:
         return config
 
     @staticmethod
-    def _has_unversioned_history_schema(engine: Engine) -> bool:
+    def _unversioned_history_revision(engine: Engine) -> str | None:
         inspector = inspect(engine)
         table_names = set(inspector.get_table_names())
-        return {"searches", "fares"}.issubset(table_names) and "alembic_version" not in table_names
+        if not {"searches", "fares"}.issubset(table_names) or "alembic_version" in table_names:
+            return None
+
+        fare_columns = {column["name"] for column in inspector.get_columns("fares")}
+        round_trip_columns = {"return_date", "trip_type", "price_kind", "source_freshness"}
+        if round_trip_columns.issubset(fare_columns):
+            return "20260730_0002"
+        return "20260709_0001"
